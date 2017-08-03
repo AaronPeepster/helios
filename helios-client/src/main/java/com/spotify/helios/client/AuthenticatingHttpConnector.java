@@ -22,7 +22,9 @@ package com.spotify.helios.client;
 
 import static java.net.HttpURLConnection.HTTP_FORBIDDEN;
 import static java.net.HttpURLConnection.HTTP_UNAUTHORIZED;
+import static java.util.Collections.singletonList;
 
+import com.google.auth.oauth2.AccessToken;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
@@ -57,6 +59,7 @@ public class AuthenticatingHttpConnector implements HttpConnector {
   private static final Logger log = LoggerFactory.getLogger(AuthenticatingHttpConnector.class);
 
   private final String user;
+  private final Optional<AccessToken> accessTokenOpt;
   private final Optional<AgentProxy> agentProxy;
   private final Optional<CertKeyPaths> clientCertificatePath;
   private final List<Identity> identities;
@@ -65,22 +68,25 @@ public class AuthenticatingHttpConnector implements HttpConnector {
   private final DefaultHttpConnector delegate;
 
   public AuthenticatingHttpConnector(final String user,
+                                     final Optional<AccessToken> accessTokenOpt,
                                      final Optional<AgentProxy> agentProxyOpt,
                                      final Optional<CertKeyPaths> clientCertificatePath,
                                      final EndpointIterator endpointIterator,
                                      final DefaultHttpConnector delegate) {
-    this(user, agentProxyOpt, clientCertificatePath, endpointIterator,
+    this(user, accessTokenOpt, agentProxyOpt, clientCertificatePath, endpointIterator,
         delegate, getSshIdentities(agentProxyOpt));
   }
 
   @VisibleForTesting
   AuthenticatingHttpConnector(final String user,
+                              final Optional<AccessToken> accessTokenOpt,
                               final Optional<AgentProxy> agentProxyOpt,
                               final Optional<CertKeyPaths> clientCertificatePath,
                               final EndpointIterator endpointIterator,
                               final DefaultHttpConnector delegate,
                               final List<Identity> identities) {
     this.user = user;
+    this.accessTokenOpt = accessTokenOpt;
     this.agentProxy = agentProxyOpt;
     this.clientCertificatePath = clientCertificatePath;
     this.endpointIterator = endpointIterator;
@@ -105,8 +111,11 @@ public class AuthenticatingHttpConnector implements HttpConnector {
     try {
       log.debug("connecting to {}", ipUri);
 
-      if (clientCertificatePath.isPresent()) {
-        // prioritize using the certificate file if set
+      if (accessTokenOpt.isPresent()) {
+        // prioritize using bearer token
+        return connectWithBearerToken(ipUri, method, entity, headers);
+      } else if (clientCertificatePath.isPresent()) {
+        // use a specific certificate file if set
         return connectWithCertificateFile(ipUri, method, entity, headers);
       } else if (agentProxy.isPresent() && !identities.isEmpty()) {
         // ssh-agent based authentication
@@ -127,6 +136,14 @@ public class AuthenticatingHttpConnector implements HttpConnector {
     }
   }
 
+  private HttpURLConnection connectWithBearerToken(final URI ipUri, final String method,
+                                                   final byte[] entity,
+                                                   final Map<String, List<String>> headers)
+      throws HeliosException {
+    headers.put("Authorization", singletonList(String.format("Bearer %s", accessTokenOpt)));
+    return doConnect(ipUri, method, entity, headers);
+  }
+
   private HttpURLConnection connectWithCertificateFile(final URI ipUri, final String method,
                                                        final byte[] entity,
                                                        final Map<String, List<String>> headers)
@@ -135,8 +152,7 @@ public class AuthenticatingHttpConnector implements HttpConnector {
     final CertKeyPaths clientCertificatePath = this.clientCertificatePath.get();
     log.debug("configuring CertificateFileHttpsHandler with {}", clientCertificatePath);
 
-    delegate.setExtraHttpsHandler(CertFileHttpsHandler.create(false, clientCertificatePath)
-    );
+    delegate.setExtraHttpsHandler(CertFileHttpsHandler.create(false, clientCertificatePath));
 
     return doConnect(ipUri, method, entity, headers);
   }
